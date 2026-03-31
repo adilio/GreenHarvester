@@ -4,6 +4,25 @@ A Python tool that exports everything from your Greenhouse account and converts 
 
 ---
 
+## Table of contents
+
+- [What this does](#what-this-does)
+- [Before you start](#before-you-start)
+- [Running the script](#running-the-script)
+- [Output structure](#output-structure)
+- [Understanding the output folders](#understanding-the-output-folders)
+- [What gets exported](#what-gets-exported)
+- [Importing into Lever](#importing-into-lever)
+- [Lever field mapping](#lever-field-mapping)
+- [Rate limits and performance](#rate-limits-and-performance)
+- [Why certain design decisions were made](#why-certain-design-decisions-were-made)
+- [Testing](#testing)
+- [Deprecation notice](#deprecation-notice)
+- [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
+
+---
+
 ## What this does
 
 When you run this script, it connects to your Greenhouse account using the official Harvest API and downloads every piece of data your account contains: all candidates, every application ever submitted, job postings, offers, interview feedback, scorecards, team users, org structure, and more. It also downloads the actual resume and attachment files for every candidate.
@@ -114,7 +133,7 @@ The default is 6 parallel threads. If you have a large number of attachments and
 If your API key doesn't have permission for certain endpoints, or you simply don't need them:
 
 ```bash
-python greenharvester.py --api-key YOUR_KEY --skip email_templates,approval_flows
+python greenharvester.py --api-key YOUR_KEY --skip email_templates,prospect_pools
 ```
 
 ---
@@ -290,9 +309,9 @@ This section explains the research and reasoning behind some non-obvious choices
 
 The Greenhouse API documentation notes that it is transitioning some endpoints to a newer pagination model that returns only a `next` link — no `page` parameter in the response, and no `last` link. Manually incrementing a page counter and reconstructing the URL would silently fail on those endpoints once they complete the transition. The script always extracts and follows the full `next` URL from the `Link` response header, which works correctly for both the legacy numbered-page model and the newer cursor-based model.
 
-### Attachment URLs must be downloaded immediately
+### Attachment URLs are treated as ephemeral
 
-Greenhouse hosts all file attachments on Amazon S3 using signed, temporary URLs. These URLs are generated fresh each time you call the API and expire shortly after. The original approach of collecting all URLs during the data export phase and then downloading them later (potentially hours into a long run) would result in expired links and failed downloads for any large export. The script now collects attachment tasks directly from the freshly-fetched API responses and hands them to the download pool immediately, before the S3 signatures have time to expire.
+Greenhouse hosts file attachments on Amazon S3 using signed, temporary URLs. These URLs are generated fresh each time you call the API and expire shortly after. That means attachment handling has to be part of the same export run that fetched the candidate and application payloads. The script builds attachment tasks directly from those freshly exported records and then runs a dedicated download phase without re-querying the API for file URLs. On very large exports some signed URLs can still expire before download, which is why failures are logged clearly and re-runs resume cleanly.
 
 ### Application-level attachments are a separate set
 
@@ -389,11 +408,128 @@ The most common cause is API key permissions. Each endpoint must be explicitly g
 S3 signed URLs expire quickly. If a large export runs for a very long time before reaching the download phase, some URLs may have expired. The export log records the URL and error for every failed download. In this case, run the script again with `--skip` for all resource types except candidates and applications, then rely on the fresh attachment URLs in the new export.
 
 **A specific resource type is unavailable**
-Use `--skip` to exclude that endpoint. For example, if your API key does not have access to `approval_flows`:
+Use `--skip` to exclude that endpoint. For example, if your API key does not have access to `email_templates`:
 
 ```bash
-python greenharvester.py --api-key YOUR_KEY --skip approval_flows
+python greenharvester.py --api-key YOUR_KEY --skip email_templates
 ```
 
 **The export is taking a very long time**
 For organisations with tens of thousands of candidates and many years of attachment files, full exports can take over an hour. The attachment download phase is the most time-consuming. You can increase `--workers` to speed up parallel downloads, or do a first run with `--no-resumes` to get the data quickly and then run again for attachments only.
+
+---
+
+## FAQ
+
+### Why did you build this?
+
+A friend's company was migrating off Greenhouse and needed to get all their data out: candidates, resumes, scorecards, the whole thing. The existing tools I found were either too narrow, handled pagination unsafely, missed attachments, or looked abandoned.
+
+So I built something (IMO) properly. One script, full export, real file downloads, a usable backup, and a Lever-shaped export for the original migration use case. Then I figured other people were probably stuck in the same situation, so I cleaned it up into a real repo.
+
+### Is it proprietary? Can I use it?
+
+Nope. It's open source under the MIT license. Fork it, modify it, use it at work, use it for a one-off migration, send a PR if you fix something interesting.
+
+### Is it safe to run?
+
+Reasonable question to ask before pointing a Harvest API key at a script you found on the internet.
+
+What it does:
+
+- Makes read-only `GET` requests to the Greenhouse Harvest API
+- Downloads attachment files from the signed URLs Greenhouse returns
+- Writes JSON, CSV, manifest, log, Lever export, and attachment files to your local output folder
+
+What it does not do:
+
+- Write anything back to Greenhouse
+- Make any `POST`, `PATCH`, `PUT`, or `DELETE` API calls
+- Send your data anywhere other than your own disk
+- Phone home or log remotely
+
+You should still read the source before running it. Seriously. You're handing it access to your recruiting history. The repo is intentionally small, the main script is readable, and the only runtime dependencies are `requests` and `tqdm`, both of which are easy to audit.
+
+### Is this just vibe-coded slop?
+It's 2026, so yes, there was LLM assistance involved. That's not the interesting question.
+
+The interesting question is whether anyone applied actual rigour to it, or just hit Tab until something ran.
+
+On this one, some important bits were thought through:
+
+- The script reads `X-RateLimit-Remaining` and throttles proactively instead of assuming the Greenhouse limit is "50 per second".
+- Pagination follows the full `rel="next"` URL from the `Link` header rather than rebuilding page numbers manually, which is safer as Greenhouse moves endpoints toward cursor-style pagination.
+- Attachment handling reads both candidate-level and application-level attachments and deduplicates by URL, so it does not silently miss files attached only to applications.
+- Failed resource exports are logged and recorded in `manifest.json` instead of killing the entire run.
+- Partial attachment files are deleted on failure, and completed downloads are tracked via `.complete` markers so re-runs resume cleanly.
+- Date filters are only applied to endpoints that actually support them, which avoids avoidable `422` errors.
+- Inputs are validated early: date flags are checked before export and the API key is verified against a live endpoint before the main run begins.
+
+One place where the older version changed: attachment handling is now tied to the same export run that fetched the signed URLs, instead of treating downloads as some completely separate later concern. That's safer, but on very large exports signed URLs can still expire before every file is fetched, which is why failures are logged clearly and the whole thing is resumable instead of pretending the problem does not exist.
+
+Read the code and make your own call.
+
+### Is there a warranty or support guarantee?
+
+Ha. No.
+
+It's provided as-is under the MIT license, with no warranty of any kind. If it eats your export, ruins your afternoon, or causes your laptop to achieve sentience and resign, that's on you.
+
+More practically: the script uses a real documented API, but APIs change and endpoints get deprecated. Always inspect the output before you decommission anything or trust it as your only copy.
+
+### What if something goes wrong mid-export?
+
+A few things are designed specifically for that:
+
+- Attachment downloads are resumable via `.complete` marker files
+- Resource-level failures are non-fatal and recorded in both `export.log` and `manifest.json`
+- Failed attachment downloads are summarized at the end instead of stopping the pool mid-run
+- Output folders are timestamped, so re-running creates a new export instead of overwriting an older one
+
+### Why does it produce both JSON and CSV?
+
+Because they solve different problems, and producing both costs basically nothing.
+
+JSON is the complete, lossless backup. CSV is flattened and easier to inspect in Excel, Google Sheets, or quick audits. Both are part of the backup; neither is specific to Lever.
+
+### Does it support incremental exports?
+
+Yes, with `--after` and `--before`:
+
+```bash
+# Everything created since the start of 2024
+python greenharvester.py --api-key YOUR_KEY --after 2024-01-01
+
+# A specific window
+python greenharvester.py --api-key YOUR_KEY --after 2023-01-01 --before 2024-01-01
+```
+
+These map to Greenhouse `created_after` and `created_before` parameters on the endpoints that support them: candidates, applications, jobs, offers, scorecards, interviews, users, and job posts. Lookup-style resources such as departments, offices, sources, and prospect pools are always exported in full.
+
+### What Greenhouse plan or permissions do I need?
+
+You need to be a Site Admin to create a Harvest API key. The script only needs read access.
+
+Whether a given endpoint returns data depends on both your API key permissions and whether your Greenhouse account actually has that feature enabled. If a resource is empty or forbidden, check both before assuming the script is wrong.
+
+### Why is it only Lever for the migration output?
+
+Because that was the original problem that needed solving.
+
+The JSON and CSV exports are destination-agnostic backups. Only the `lever/` folder is specific to Lever. If you want another ATS target, the right extension point is to add another mapper alongside the Lever export.
+
+### The Harvest API v1 is being deprecated. What now?
+
+Greenhouse says Harvest API v1 and v2 retire on **August 31, 2026**. GreenHarvester currently uses v1 and prints a warning on every run.
+
+If you are doing a one-time migration before that date, you are fine. If you need this repo to keep working after **August 31, 2026**, it will need a v3 update. The docs are at [harvestdocs.greenhouse.io](https://harvestdocs.greenhouse.io).
+
+### Something's broken or missing. How do I report it?
+
+Open a GitHub issue with:
+
+1. What you were trying to do
+2. The relevant lines from `export.log`
+3. The resource type or endpoint involved
+
+Do not paste your API key anywhere. Ever.
