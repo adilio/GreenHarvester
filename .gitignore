@@ -1,0 +1,41 @@
+# Export output — never commit actual Greenhouse data
+greenhouse_export_*/
+greenhouse_export_output/
+
+# Secrets — never commit API keys
+.env
+.env.*
+*.env
+secrets.json
+config.json
+
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs that end up in the working directory rather than an export folder
+export.log
+*.log
